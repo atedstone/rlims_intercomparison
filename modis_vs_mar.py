@@ -181,7 +181,7 @@ for ix, aoi in polys.iterrows():
     m = polygons_to_mar_mask(mar_eg, polygons=aoi)
     m['aoi'] = ix
     store.append(m)
-    
+
 
 # %% trusted=true
 aois = xr.concat(store, dim='aoi')
@@ -210,6 +210,48 @@ ru_annual = runoff.RU.sel(SECTOR=1).where(runoff.RU.sel(SECTOR=1) > 1).resample(
 
 # %% trusted=true
 ru_annual
+
+# %% [markdown]
+# ## DEBUG
+
+# %% trusted=true
+plt.figure()
+aois.sel(aoi=156).plot()
+
+# %% trusted=true
+plt.figure()
+dem.where(aois.sel(aoi=156)).plot(vmin=0, vmax=2500)
+
+# %% trusted=true
+plt.figure()
+dem.where(aois.sel(aoi=156)).plot.hist(range=(0, 3000))
+
+# %% trusted=true
+plt.figure()
+(ru_annual.where(aois.sel(aoi=156)).sum(dim=('x','y')) / 10 / 100 * (6000*6000) / 1e9).plot()
+
+# %% trusted=true
+fig = plt.figure()
+#ru_annual.plot(col='time', col_wrap=5, cmap='Greys_r', vmin=0, vmax=100)
+ru_annual.where(aois.sel(aoi=156)).plot(col='time', col_wrap=5, cmap='viridis', vmin=0, vmax=100)
+
+# %% trusted=true
+plt.figure()
+dem.where(ru_annual > 1).where(aois.sel(aoi=156)).plot(col='time', col_wrap=5, cmap='viridis', vmin=0, vmax=2500)
+
+# %% trusted=true
+ru_gt1_count = ru_annual.where(ru_annual > 1).count(dim='time').where(mar_eg.MSK > 50)
+
+
+# %% trusted=true
+plt.figure()
+ru_gt1_count.plot()
+
+# %% trusted=true
+ru_gt1_count.rio.to_raster('/flash/tedstona/ru_gt1_count.tif')
+
+# %% [markdown]
+# ## END DEBUG
 
 # %% trusted=true
 # Single AOI test case
@@ -328,4 +370,80 @@ RO1_upper_max = RO1_upper.resample(time='1AS').max()
 # %% trusted=true
 cluster.close()
 
+# %% [markdown]
+# ## Seasonal runoff extraction
+
 # %% trusted=true
+store = {}
+for t in [1, 5, 10]:
+    rlim12 = dem.where(aois.sel(aoi=156)).where(runoff.sel(time='2012').RU.sel(SECTOR=1) > t).where(mar_eg.MSK > 50).max(dim=('x','y'))
+    store[t] = rlim12.squeeze().to_pandas()
+
+# %% trusted=true
+import pandas as pd
+rlims = pd.DataFrame(store)
+
+# %% trusted=true
+import seaborn as sns
+
+# %% trusted=true
+with sns.color_palette('PuRd', 4):
+    rlims[rlims > 0].plot(marker='.')
+
+
+# %% trusted=true
+rlims[rlims >0].to_csv('/flash/tedstona/fl156_2012_thresholds_mar.csv')
+
+# %% trusted=true
+rlim156 = dem.where(aois.sel(aoi=156)).where(runoff.RU.sel(SECTOR=1) > t).where(mar_eg.MSK > 50).max(dim=('x','y')).to_pandas()
+
+# %% trusted=true
+rlim156
+
+# %% trusted=true
+rlim156.name = 'rlim'
+rlim156_df = rlim156.to_frame()
+rlim156_df.loc[:,'doy'] = rlim156_df.index.dayofyear
+rlim156_df.loc[:,'year'] = rlim156_df.index.year
+rlim156_piv = pd.pivot_table(rlim156_df, columns='year', index='doy', values='rlim')
+
+# %% trusted=true
+rlim156_piv
+
+# %% trusted=true
+rlim156_piv[rlim156_piv > 0].cummax().plot()
+
+# %% trusted=true
+m = rlim156_piv[rlim156_piv > 0].cummax().mean(axis=1).loc[150:250]
+s = rlim156_piv[rlim156_piv > 0].cummax().std(axis=1).loc[150:250]
+
+# %% trusted=true
+sns.set_context('paper', rc={'font.family':'arial'})
+plt.figure()
+plt.fill_between(m.index, m-s, m+s, color='tab:blue', alpha=0.2, label='+/- 1 std 2000-2020')
+m.loc[150:250].plot(linewidth=2, label='Mean 2000-2020')
+rlim156_piv[rlim156_piv > 0].cummax().loc[150:250, 2012].plot(label='2012')
+rlim156_piv[rlim156_piv > 0].cummax().loc[150:250, 2020].plot(label='2020')
+plt.legend()
+plt.ylabel('Runoff limit (m asl)')
+plt.xlabel('Day of year')
+plt.title('Flowline 156 | MAR | > 10 mm w.e. d')
+plt.ylim(750, 2500)
+plt.grid()
+sns.despine()
+
+# %% trusted=true
+rlim156_piv[rlim156_piv > 0].cummax().to_csv('/flash/tedstona/fl156_2012_cummax_mar.csv')
+
+# %% trusted=true
+plt.figure()
+rlim12.sel(SECTOR=1).plot(marker='o', linestyle='none')
+plt.ylim(0, 2500)
+
+# %% trusted=true
+runoff.rio.clip(polys[polys['index'] == 156].geometry)
+
+# %% trusted=true
+runoff.drop_vars(['OUTLAY_bnds', 'TIME_bnds']).rio.clip(polys[polys['index'] == 156].geometry)
+
+# %%
