@@ -26,6 +26,7 @@ import geopandas as gpd
 import rioxarray
 import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
 
 # %% [markdown]
 # ## Dask cluster support
@@ -38,7 +39,7 @@ cluster.scale(jobs=4)
 client = Client(cluster)
 
 # %% trusted=true
-cluster.scale(jobs=4) #jobs=4
+cluster.scale(jobs=8) #jobs=4
 
 # %% trusted=true
 client
@@ -188,7 +189,10 @@ aois = xr.open_dataarray(os.path.join(pth_project, 'racmo_polys.nc'))
 aois.sum(dim='aoi').plot()
 
 # %% [markdown]
-# ## Prepare full RACMO time series
+# <hr />
+
+# %% [markdown]
+# ## Annual maximum runoff limit
 
 # %% trusted=true
 THRESHOLD = 1
@@ -228,8 +232,8 @@ else:
 # %% trusted=true
 ru_annual_nc = xr.open_dataarray(ru_annual_f, chunks={'time':21})
 
-# %% [markdown]
-# ## DEBUG
+# %% [markdown] tags=[]
+# #### DEBUG
 
 # %% trusted=true
 # %matplotlib widget
@@ -240,7 +244,7 @@ ru_count = ru_annual_nc.where(ru_annual_nc > 1).count(dim='time') #.plot(vmin=0,
 ru_count.rio.to_raster('/flash/tedstona/racmo_ru_gt1_count.tif')
 
 # %% [markdown]
-# ## END DEBUG
+# #### END DEBUG
 
 # %% [markdown]
 # ### Create runoff-masked DEMS
@@ -282,8 +286,6 @@ aoi_ru_f = os.path.join(pth_project, 'RACMO2.3p2_ERA5_3h_FGRN055.1km-rlim-RUa%sm
 aoi_ru_save.to_netcdf(aoi_ru_f)
 
 # %% [markdown]
-# ---
-#
 # ### Export to CSV; Initial analysis
 
 # %% trusted=true
@@ -326,7 +328,10 @@ racmo_rlim_10mm.runoff_limit.mean(dim='time').plot(ax=ax)
 racmo_rlim_1mm
 
 # %% [markdown]
-# ## Seasonal runoff limits
+# ## Seasonal runoff limits extraction
+
+# %% [markdown]
+# ### Load data
 
 # %% trusted=true
 polys = gpd.read_file(os.path.join(pth_project, 'Ys_polygons_v3.4b.shp'))
@@ -336,7 +341,7 @@ polys.index = polys['index']
 runoff = xr.open_mfdataset(os.path.join(pth_racmo, 'runoff.20*.nc'))
 runoff.rio.write_crs('epsg:3413', inplace=True)
 runoff = runoff.sel(time=slice('2000-01-01','2022-01-01'))
-t_chunks = tuple([len(pd.date_range('%s-01-01'%year, '%s-12-31'%year, freq='D')) for year in range(2000, 2021)])
+t_chunks = tuple([len(pd.date_range('%s-01-01'%year, '%s-12-31'%year, freq='D')) for year in range(2000, 2022)])
 #runoff = runoff.chunk({'time':t_chunks, 'y':2700, 'x':1496})
 #runoff = runoff.rio.clip(polys[polys['index'] == 156].geometry)
 
@@ -344,27 +349,94 @@ t_chunks = tuple([len(pd.date_range('%s-01-01'%year, '%s-12-31'%year, freq='D'))
 
 # %% trusted=true
 aois.rio.write_crs('epsg:3413',inplace=True)
-#aois = aois.rio.clip(polys[polys['index'] == 156].geometry)
-store = {}
-for t in [1, 5, 10]:
-    rlim = dem.where(aois.sel(aoi=156)).where(runoff.sel(time='2012').runoffcorr > t).max(dim=('x','y'))
-    store[t] = rlim.squeeze().to_pandas()
+
+# %% [markdown]
+# ### Threshold analysis
 
 # %% trusted=true
-import pandas as pd
+store = {}
+daily_t = 1
+year = '2020'
+for annual_t in [1, 5, 10, 20, 100]:
+    rlim = dem \
+        .where(aois.sel(aoi=156)) \
+        .where(runoff.sel(time=year).runoffcorr > daily_t) \
+        .where(runoff.sel(time=year).runoffcorr.sum(dim='time') > annual_t) \
+        .max(dim=('x','y'))
+    store[annual_t] = rlim.squeeze().to_pandas()
+
+# %% trusted=true
 rlims = pd.DataFrame(store)
 
 # %% trusted=true
 rlims
 
 # %% trusted=true
-# %matplotlib widget
+# %matplotlib inline
 import seaborn as sns
-with sns.color_palette('PuRd', 4):
+with sns.color_palette('PuRd', 6):
     rlims[rlims > 0].plot(marker='.')
+    plt.ylim(1000, 1800)
 
 # %% trusted=true
-rlims[rlims >0].to_csv('/flash/tedstona/fl156_2012_thresholds_racmo.csv')
+rlims[rlims >0].to_csv('/flash/tedstona/fl156_%s_thresholds_racmo.csv' %year)
+
+# %% [markdown]
+# ### Extract seasonal runoff limits for multiple flowlines at specific threshold
+
+# %% trusted=true
+fl = pd.read_excel('/flash/tedstona/_list_PolyIDs.xlsx')
+
+# %% trusted=true
+fl
+
+# %% trusted=true
+runoff
+
+# %% trusted=true
+t_daily = 1
+t_annual = 10
+for year in range(2000, 2022):
+    print(year)
+    store = {}
+    rhere = runoff.sel(time=str(year))
+    runoff_annual_mask = rhere.runoffcorr.resample(time='1AS').sum().resample(time='1D').ffill()
+    rm = runoff_annual_mask.squeeze()
+    rm = rm.expand_dims(dim={'time': pd.date_range('%s-01-01' %year, '%s-12-31' %year, freq='D')}) #.assign_coords({'time':runoff.sel(time='2012').time})
+    runoff_prepared = rhere.runoffcorr.where(rm >= t_annual)
+    for ix, aoi in fl.iterrows():
+        print(ix)
+        rlim = dem \
+            .where(aois.sel(aoi=aoi.PolyID)) \
+            .where(runoff_prepared > t_daily) \
+            .max(dim=('x','y'))
+        res = rlim.squeeze().to_pandas()
+        store[aoi.PolyID] = res
+    rlims_here = pd.DataFrame(store)
+    rlims_here[rlims_here > 0].to_csv('/flash/tedstona/flowlines_daily_rlims_RACMO_%smmEvents_%smmAnnual_%s.csv' %(t_daily, t_annual, year))
+
+
+# %% trusted=true
+pd.DataFrame(store).plot()
+plt.ylim(0, 2000)
+
+# %% trusted=true
+## Combine yearly files
+s = []
+for year in range(2000, 2022):
+    p = '/flash/tedstona/flowlines_daily_rlims_RACMO_1mmEvents_10mmAnnual_%s.csv' %year
+    d = pd.read_csv(p)
+    s.append(d)
+all_racmo = pd.concat(s, axis=0)
+
+# %% trusted=true
+all_racmo
+
+# %% trusted=true
+all_racmo.to_csv('/flash/tedstona/flowlines_daily_rlims_RACMO_1mmEvents_10mmAnnual_2000_2021.csv')
+
+# %% [markdown]
+# ### (Defunct): Pilot analysis specifically for FL156
 
 # %% trusted=true
 rlim156 = dem.where(aois.sel(aoi=156)).where(runoff.runoffcorr > 10).max(dim=('x','y')) #.to_pandas()

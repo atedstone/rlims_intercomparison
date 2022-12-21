@@ -27,6 +27,8 @@ import numpy as np
 import geopandas as gpd
 import rioxarray
 import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
 
 # %% trusted=true
 import marutils
@@ -46,6 +48,9 @@ cluster.scale(jobs=4)
 
 # %% trusted=true
 client
+
+# %% trusted=true
+cluster.close()
 
 # %% [markdown]
 # ## Paths and data pre-requisites
@@ -194,13 +199,18 @@ aois
 aois.sum(dim='aoi').plot()
 
 # %% [markdown]
-# ## Prepare full MAR time series
+# ## Load MAR data
 
 # %% trusted=true
 runoff = marutils.open_dataset(os.path.join(pth_mar, '*.runoff.nc'), crs='epsg:3413', projection=None, base_proj4=None)
 
-# %% trusted=true
+# %% tags=[] trusted=true
 runoff
+
+# %% [markdown] tags=[]
+# <hr />
+#
+# ## Annual maximum runoff limit
 
 # %% trusted=true
 # Liege criteria = all cells where runoff exceeds 1mm day-1 on one or more days during a year.
@@ -212,7 +222,9 @@ ru_annual = runoff.RU.sel(SECTOR=1).where(runoff.RU.sel(SECTOR=1) > 1).resample(
 ru_annual
 
 # %% [markdown]
-# ## DEBUG
+# #### DEBUG
+#
+# This is for checking that the extraction is working correctly.
 
 # %% trusted=true
 plt.figure()
@@ -251,7 +263,7 @@ ru_gt1_count.plot()
 ru_gt1_count.rio.to_raster('/flash/tedstona/ru_gt1_count.tif')
 
 # %% [markdown]
-# ## END DEBUG
+# #### END DEBUG
 
 # %% trusted=true
 # Single AOI test case
@@ -314,7 +326,7 @@ rlim_pd.to_csv(os.path.join(pth_project, 'MAR-v3.12.1-rlim-RUa1mm.csv'))
 mar_rlim.close()
 
 # %% [markdown]
-# ## Slush area maximum elevation
+# ## Annual maximum elevation of 'slush limit'
 #
 # Using equations from Clerx et al. (2022).
 #
@@ -340,7 +352,7 @@ plt.figure(),por.plot()
 plt.figure(), (WA1_1m / por).max(dim='time').plot(vmin=0, vmax=1)
 
 # %% [markdown]
-# ## 2. Deploy
+# ### 2. Deploy
 #
 # Get uppermost 0.2 m of snow surface. Calculate daily water saturation. Take the maximum annual value.
 
@@ -371,28 +383,97 @@ RO1_upper_max = RO1_upper.resample(time='1AS').max()
 cluster.close()
 
 # %% [markdown]
-# ## Seasonal runoff extraction
+# ## Seasonal runoff limits extraction
+
+# %% [markdown]
+# ### Threshold analysis
 
 # %% trusted=true
+year = '2020'
 store = {}
-for t in [1, 5, 10]:
-    rlim12 = dem.where(aois.sel(aoi=156)).where(runoff.sel(time='2012').RU.sel(SECTOR=1) > t).where(mar_eg.MSK > 50).max(dim=('x','y'))
+for t in [1, 5, 10, 20, 100]:
+    rlim12 = dem \
+        .where(aois.sel(aoi=156)) \
+        .where(runoff.sel(time=year).RU.sel(SECTOR=1) >= 1) \
+        .where(mar_eg.MSK > 50) \
+        .where(runoff.sel(time=year).RU.sel(SECTOR=1).sum(dim='time') >= t) \
+        .max(dim=('x','y'))
     store[t] = rlim12.squeeze().to_pandas()
 
 # %% trusted=true
-import pandas as pd
 rlims = pd.DataFrame(store)
 
 # %% trusted=true
-import seaborn as sns
-
-# %% trusted=true
-with sns.color_palette('PuRd', 4):
+with sns.color_palette('PuRd', 7):
     rlims[rlims > 0].plot(marker='.')
 
 
 # %% trusted=true
-rlims[rlims >0].to_csv('/flash/tedstona/fl156_2012_thresholds_mar.csv')
+rlims[rlims >0].to_csv('/flash/tedstona/fl156_%s_thresholds_mar.csv' %year)
+
+# %% [markdown]
+# ## Extract seasonal runoff limits for multiple flowlines at specific threshold
+
+# %% trusted=true
+# Load polygons list provided by Horst
+fl = pd.read_excel('/flash/tedstona/_list_PolyIDs.xlsx')
+
+# %% trusted=true
+fl
+
+# %% trusted=true
+runoff
+
+# %% trusted=true
+store = {}
+t_daily = 1
+t_annual = 10
+
+"""
+We do this year-by-year:
+    1. Corresponds with RACMO approach, which requires year-by-year to be computationally feasible (graphing doesn't work otherwise)
+    2. The ffill() operation still misses the final year of data, because there isn't a time point for the following year.
+"""
+for year in range(2000, 2022):
+    runoff_annual_mask = runoff.RU.sel(SECTOR=1).resample(time='1AS').sum() #.resample(time='1D', loffset='12H').ffill()
+    m = runoff_annual_mask.sel(time=str(year)).squeeze()
+    rm = m.expand_dims(dim={'time': pd.date_range('%s-01-01 12:00' %year, '%s-12-31 12:00' %year, freq='D')})
+    runoff_prepared = runoff.RU.sel(SECTOR=1, time=str(year)).where(rm >= t_annual)
+    for ix, aoi in fl.iterrows():
+        print(aoi)
+        rlim = dem \
+            .where(aois.sel(aoi=aoi.PolyID)) \
+            .where(runoff_prepared > t_daily) \
+            .where(mar_eg.MSK > 50) \
+            .max(dim=('x','y'))
+        store[aoi.PolyID] = rlim.squeeze().to_pandas()
+    rlims_here = pd.DataFrame(store)
+    rlims_here[rlims_here > 0].to_csv('/flash/tedstona/flowlines_daily_rlims_MAR_%smmEvents_%smmAnnual_%s.csv' %(t_daily, t_annual, year))
+
+# %% trusted=true
+fl_rlims = pd.DataFrame(store)
+
+# %% trusted=true
+fl_rlims[fl_rlims > 0].plot()
+
+# %% trusted=true
+## Combine yearly files
+s = []
+#s.append(pd.read_csv('/flash/tedstona/flowlines_daily_rlims_MAR_1mmEvents_10mmAnnual.csv'))
+for year in range(2000, 2022):
+    p = '/flash/tedstona/flowlines_daily_rlims_MAR_1mmEvents_10mmAnnual_%s.csv' %year
+    d = pd.read_csv(p)
+    s.append(d)
+all_mar = pd.concat(s, axis=0)
+
+# %% trusted=true
+all_mar
+
+# %% trusted=true
+all_mar.to_csv('/flash/tedstona/flowlines_daily_rlims_MAR_1mmEvents_10mmAnnual_2000_2021.csv')
+
+# %% [markdown]
+# ## (Defunct): Testing seasonal extraction with Flowline 156
 
 # %% trusted=true
 rlim156 = dem.where(aois.sel(aoi=156)).where(runoff.RU.sel(SECTOR=1) > t).where(mar_eg.MSK > 50).max(dim=('x','y')).to_pandas()
