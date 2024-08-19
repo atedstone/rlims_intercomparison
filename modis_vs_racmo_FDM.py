@@ -348,39 +348,6 @@ racmo_rlim_reload = xr.open_dataset(os.path.join(pth_project, 'FDM_Runoff_FGRN05
 racmo_rlim_reload.runoff_limit.mean(dim='time').plot(ax=ax)
 
 # %% [markdown]
-# ## Processing for comparisons with Zhang et al. (2023)
-#
-# From their text, "Daily RACMO2.3p2 simulations of surface water runoff are available from No¨el et al. (2019). RACMO2.3p2 exhibits a high spatial resolution of 1 km through statistical downscaling of its native 5.5 km resolution (No¨el et al., 2019). For the 2018 and 2019 mapping periods, we intersect the 1 km × 1 km RACMO grid cells with each basin and divide the sum of runoff by basin area to obtain mean runoff for each basin, following Li et al. (2022). Additionally, RACMO runoff values for each grid cell in the
-# 2018 and 2019 mapping periods are temporally averaged to obtain spatial representations of mean daily runoff. The line where runoff values change from zero to positive values is used as the runoff elevation limit."
-#
-# The mapping periods are defined as follows:
-# 2018: July 25-30, plus July 17-24,, July 31 to August 5
-# 2019: July 29 to August 5, plus additional July 15-28, August 6-15, July 6, July 13, August 19
-#
-# The authors do not provide the code for their RACMO processing and the text lacks full clarity about whether the "mapping periods" are just the core date ranges, or whether they also include the other dates listed.
-
-# %% scrolled=true tags=[] trusted=true
-runoff = xr.open_mfdataset(os.path.join(pth_racmo, '*.nc'))
-runoff.rio.write_crs('epsg:3413', inplace=True)
-runoff = runoff.runoffcorr
-
-# %% trusted=true
-ru2018 = runoff.sel(time=slice('2018-07-25', '2018-07-30')).mean(dim='time') > 1
-ru2019 = runoff.sel(time=slice('2019-07-29', '2019-08-05')).mean(dim='time') > 1
-
-# %% trusted=true
-fig, ax = plt.subplots()
-ru2018.plot(ax=ax)
-ru2019.plot(ax=ax, alpha=0.5)
-
-# %% trusted=true
-ru2018 = runoff.sel(time=slice('2018-06-01', '2018-09-30')).sum(dim='time') > 10
-ru2019 = runoff.sel(time=slice('2019-06-01', '2019-09-30')).sum(dim='time') > 10
-fig, ax = plt.subplots()
-ru2018.plot(ax=ax)
-ru2019.plot(ax=ax, alpha=0.5, cmap='rocket')
-
-# %% [markdown]
 # ## Seasonal runoff limits extraction
 
 # %% [markdown]
@@ -389,16 +356,6 @@ ru2019.plot(ax=ax, alpha=0.5, cmap='rocket')
 # %% trusted=true
 polys = gpd.read_file(os.path.join(pth_project, 'Ys_polygons_v3.4b.shp'))
 polys.index = polys['index']
-
-# %% scrolled=true tags=[] trusted=true
-runoff = xr.open_mfdataset(os.path.join(pth_racmo, 'runoff.20*.nc'))
-runoff.rio.write_crs('epsg:3413', inplace=True)
-runoff = runoff.sel(time=slice('2000-01-01','2022-01-01'))
-t_chunks = tuple([len(pd.date_range('%s-01-01'%year, '%s-12-31'%year, freq='D')) for year in range(2000, 2022)])
-#runoff = runoff.chunk({'time':t_chunks, 'y':2700, 'x':1496})
-#runoff = runoff.rio.clip(polys[polys['index'] == 156].geometry)
-
-#dem = dem.rio.clip(polys[polys['index'] == 156].geometry)
 
 # %% trusted=true
 aois.rio.write_crs('epsg:3413',inplace=True)
@@ -438,25 +395,26 @@ rlims[rlims >0].to_csv('/flash/tedstona/fl156_%s_thresholds_racmo.csv' %year)
 # ### Extract seasonal runoff limits for multiple flowlines at specific threshold
 
 # %% trusted=true
-fl = pd.read_excel('/flash/tedstona/_list_PolyIDs.xlsx')
+fl = pd.read_excel(os.path.join(pth_project, '_list_PolyIDs.xlsx'))
 
 # %% trusted=true
 fl
 
 # %% trusted=true
+runoff = racmo_ds.Runoff.sel(time=slice('2000-01-01','2022-01-01'))
 runoff
 
-# %% trusted=true
+# %% scrolled=true tags=[] trusted=true
 t_daily = 1
 t_annual = 10
-for year in range(2000, 2022):
+for year in range(2000, 2021):
     print(year)
     store = {}
     rhere = runoff.sel(time=str(year))
-    runoff_annual_mask = rhere.runoffcorr.resample(time='1AS').sum().resample(time='1D').ffill()
+    runoff_annual_mask = rhere.resample(time='1AS').sum().resample(time='1D').ffill()
     rm = runoff_annual_mask.squeeze()
     rm = rm.expand_dims(dim={'time': pd.date_range('%s-01-01' %year, '%s-12-31' %year, freq='D')}) #.assign_coords({'time':runoff.sel(time='2012').time})
-    runoff_prepared = rhere.runoffcorr.where(rm >= t_annual)
+    runoff_prepared = rhere.where(rm >= t_annual)
     for ix, aoi in fl.iterrows():
         print(ix)
         rlim = dem \
@@ -466,7 +424,7 @@ for year in range(2000, 2022):
         res = rlim.squeeze().to_pandas()
         store[aoi.PolyID] = res
     rlims_here = pd.DataFrame(store)
-    rlims_here[rlims_here > 0].to_csv('/flash/tedstona/flowlines_daily_rlims_RACMO_%smmEvents_%smmAnnual_%s.csv' %(t_daily, t_annual, year))
+    rlims_here[rlims_here > 0].to_csv(os.path.join(pth_project, 'flowlines_daily_rlims_RACMO-FDM_%smmEvents_%smmAnnual_%s.csv' %(t_daily, t_annual, year)))
 
 
 # %% trusted=true
@@ -476,8 +434,8 @@ plt.ylim(0, 2000)
 # %% trusted=true
 ## Combine yearly files
 s = []
-for year in range(2000, 2022):
-    p = '/flash/tedstona/flowlines_daily_rlims_RACMO_1mmEvents_10mmAnnual_%s.csv' %year
+for year in range(2000, 2021):
+    p = os.path.join(pth_project, 'flowlines_daily_rlims_RACMO-FDM_1mmEvents_10mmAnnual_%s.csv' %year)
     d = pd.read_csv(p)
     s.append(d)
 all_racmo = pd.concat(s, axis=0)
@@ -486,7 +444,40 @@ all_racmo = pd.concat(s, axis=0)
 all_racmo
 
 # %% trusted=true
-all_racmo.to_csv('/flash/tedstona/flowlines_daily_rlims_RACMO_1mmEvents_10mmAnnual_2000_2021.csv')
+all_racmo.to_csv(os.path.join(pth_project, 'flowlines_daily_rlims_RACMO-FDM_1mmEvents_10mmAnnual_2000_2020.csv'))
+
+# %% [markdown]
+# ## Processing for comparisons with Zhang et al. (2023)
+#
+# From their text, "Daily RACMO2.3p2 simulations of surface water runoff are available from No¨el et al. (2019). RACMO2.3p2 exhibits a high spatial resolution of 1 km through statistical downscaling of its native 5.5 km resolution (No¨el et al., 2019). For the 2018 and 2019 mapping periods, we intersect the 1 km × 1 km RACMO grid cells with each basin and divide the sum of runoff by basin area to obtain mean runoff for each basin, following Li et al. (2022). Additionally, RACMO runoff values for each grid cell in the
+# 2018 and 2019 mapping periods are temporally averaged to obtain spatial representations of mean daily runoff. The line where runoff values change from zero to positive values is used as the runoff elevation limit."
+#
+# The mapping periods are defined as follows:
+# 2018: July 25-30, plus July 17-24,, July 31 to August 5
+# 2019: July 29 to August 5, plus additional July 15-28, August 6-15, July 6, July 13, August 19
+#
+# The authors do not provide the code for their RACMO processing and the text lacks full clarity about whether the "mapping periods" are just the core date ranges, or whether they also include the other dates listed.
+
+# %% scrolled=true tags=[] trusted=true
+runoff = xr.open_mfdataset(os.path.join(pth_racmo, '*.nc'))
+runoff.rio.write_crs('epsg:3413', inplace=True)
+runoff = runoff.runoffcorr
+
+# %% trusted=true
+ru2018 = runoff.sel(time=slice('2018-07-25', '2018-07-30')).mean(dim='time') > 1
+ru2019 = runoff.sel(time=slice('2019-07-29', '2019-08-05')).mean(dim='time') > 1
+
+# %% trusted=true
+fig, ax = plt.subplots()
+ru2018.plot(ax=ax)
+ru2019.plot(ax=ax, alpha=0.5)
+
+# %% trusted=true
+ru2018 = runoff.sel(time=slice('2018-06-01', '2018-09-30')).sum(dim='time') > 10
+ru2019 = runoff.sel(time=slice('2019-06-01', '2019-09-30')).sum(dim='time') > 10
+fig, ax = plt.subplots()
+ru2018.plot(ax=ax)
+ru2019.plot(ax=ax, alpha=0.5, cmap='rocket')
 
 # %% [markdown]
 # ### (Defunct): Pilot analysis specifically for FL156
